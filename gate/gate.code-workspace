@@ -1,0 +1,14 @@
+{
+  "folders": [
+    {
+      "name": "gate",
+      "path": "./"
+    }
+  ],
+  "settings": {
+    "files.associations": {
+      "new": "cpp",
+      "stdexcept": "cpp"
+    }
+  }
+}
