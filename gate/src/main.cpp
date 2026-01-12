@@ -1,27 +1,23 @@
 #include <Arduino.h>
-#include <WiFi.h>
+#include <ESP8266WiFi.h>
 #include <WiFiClient.h>
-#include <WiFiManager.h>
+#include <ESPAsyncWiFiManager.h>
 #include <ESPAsyncWebServer.h>
-#include <AsyncTCP.h>
+#include <ESPAsyncTCP.h>
 #include <PubSubClient.h>
-#include <Preferences.h>
+#include <LittleFS.h>
 #include <ArduinoJson.h>
-#include <DHT.h>
+#include <Wire.h> 
+#include <Adafruit_AHTX0.h> 
+#include <Adafruit_BMP280.h>
 
 #define PIN_RELAY_OPEN       2
 #define PIN_RELAY_CLOSE      3
-#define PIN_RELAY_TOGGLE     4
-#define PIN_RELAY_PEDESTRIAN 5
-
-#define DHTPIN GPIO_NUM_14
-#define DHTTYPE DHT22
 
 const unsigned long RELAY_PULSE_MS = 500; //ms
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
-Preferences prefs;
 
 String mqttServer = "";
 uint16_t mqttPort = 1883;
@@ -31,40 +27,57 @@ uint16_t mqttDelay = 30; // milli
 unsigned long lastMqttPublish = 0;
 
 AsyncWebServer server(80);
+DNSServer dns;
+AsyncWiFiManager wifiManager(&server, &dns);
 String state = "closed";
 
-DHT dht(DHTPIN, DHTTYPE);
+Adafruit_AHTX0 aht; 
+Adafruit_BMP280 bmp;
 
-void setupWiFi() {
-  WiFi.mode(WIFI_STA);
+bool loadConfig() {
+  if (!LittleFS.exists("/config.json")) return false;
 
-  WiFiManager wm;
-  wm.setConfigPortalBlocking(true);
-  wm.setDebugOutput(true);
+  File f = LittleFS.open("/config.json", "r");
+  DynamicJsonDocument doc(256);
+  DeserializationError err = deserializeJson(doc, f);
+  f.close();
 
-  bool res = wm.autoConnect("GateConfig", "GateConfig123");
+  if (err) return false;
 
-  if (!res) {
-    Serial.println("Failed to connect, restarting...");
-    delay(3000);
-    ESP.restart();
-  } else {
-    Serial.print("Connected to WiFi: ");
-    Serial.println(WiFi.SSID());
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
-  }
-}
-
-void loadMqttConfig() {
-  mqttServer = prefs.getString("server", "");
-  mqttPort   = prefs.getUShort("port", 1883);
-  mqttTopic  = prefs.getString("topic", "gate/state");
+  mqttServer = doc["mqttServer"] | "";
+  mqttPort   = doc["mqttPort"]   | 1883;
+  mqttTopic  = doc["mqttTopic"]  | "gate/state";
 
   Serial.println("Loaded MQTT config:");
   Serial.print("  server: "); Serial.println(mqttServer);
   Serial.print("  port  : "); Serial.println(mqttPort);
   Serial.print("  topic : "); Serial.println(mqttTopic);
+
+  return true;
+}
+
+void saveConfig(String server, uint16_t port, String topic) {
+  DynamicJsonDocument doc(256);
+  doc["mqttServer"] = server;
+  doc["mqttPort"]   = port;
+  doc["mqttTopic"]  = topic;
+
+  File f = LittleFS.open("/config.json", "w");
+  serializeJson(doc, f);
+  f.close();
+}
+
+void setupWiFi() {
+  bool res = wifiManager.autoConnect("GateConfig", "GateConfig12345");
+  if (!res) {
+    Serial.println("Failed to connect, restarting...");
+    delay(2000);
+    ESP.restart();
+  }
+
+  Serial.println("Connected to WiFi");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
 }
 
 void pulseRelay(int pin) {
@@ -103,17 +116,11 @@ void setupWebServer() {
       command.toLowerCase();
 
       if (command == "open") {
-        pulseRelay(PIN_RELAY_OPEN);
+        //pulseRelay(PIN_RELAY_OPEN);
         state = "opened";
       } else if (command == "close") {
-        pulseRelay(PIN_RELAY_CLOSE);
+        //pulseRelay(PIN_RELAY_CLOSE);
         state = "closed";
-      } else if (command == "toggle") {
-        pulseRelay(PIN_RELAY_TOGGLE);
-        state = state == "opened" ? "closed" : "opened";
-      } else if (command == "pedestrian") {
-        pulseRelay(PIN_RELAY_PEDESTRIAN);
-        state = "pedestrian";
       } else {
         request->send(400, "application/json", "{\"error\":\"unknown command\"}");
         return;
@@ -123,15 +130,21 @@ void setupWebServer() {
     }
   );
 
-  server.on("/state", HTTP_GET, 
-    [](AsyncWebServerRequest *request){},
-    nullptr,
-    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  server.on("/state", HTTP_GET, [](AsyncWebServerRequest *request) {
+      sensors_event_t humidity, temp;
+      aht.getEvent(&humidity, &temp);
+      
       JsonDocument resp; 
       resp["state"] = state;
-      String out; serializeJson(resp, out);
+      resp["hum"] = String(humidity.relative_humidity);
+      resp["aht_temp"] = String(temp.temperature);
+      resp["bmp_temp"] = String(bmp.readTemperature());
+      resp["pressure"] = String(bmp.readPressure() / 100.0F);
+
+      String out; 
+      serializeJson(resp, out);
       request->send(200, "application/json", out);
-    });
+  });
 
   // ---- MQTT config ----
   // {"server":"192.168.1.10","port":1883,"topic":"gate/state"}
@@ -162,10 +175,10 @@ void setupWebServer() {
       mqttTopic  = doc["topic"].as<String>();
       mqttDelay  = doc["delay"].as<uint16_t>();
 
-      prefs.putString("server", mqttServer);
+      /*prefs.putString("server", mqttServer);
       prefs.putUShort("port", mqttPort);
       prefs.putString("topic", mqttTopic);
-      prefs.putUShort("delay", mqttDelay);
+      prefs.putUShort("delay", mqttDelay);*/
 
       mqttClient.setServer(mqttServer.c_str(), mqttPort);
 
@@ -188,14 +201,22 @@ void setupWebServer() {
     }
   );
 
+  server.on("/reset/wifi", HTTP_GET, [](AsyncWebServerRequest *req){
+      req->send(200, "text/plain", "Ok");
+      wifiManager.resetSettings();
+      ESP.restart();
+    }
+  );
+
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", "Available api: POST /state { 'command': 'open' | 'close' | 'toggle' | 'pedestrian' } or POST /config/mqtt {'server':'192.168.1.10','port':1883,'topic':'gate/state'}");
+    request->send(200, "text/plain", "Available api: GET /reset/wifi ; POST /state { 'command': 'open' | 'close' } ; GET /state ; POST /config/mqtt {'server':'192.168.1.10','port':1883,'topic':'gate/state'}");
   });
 
   server.begin();
   Serial.println("HTTP server started.");
 }
 
+/*
 void ensureMqttConnected() {
   if (mqttServer.length() == 0) return;
 
@@ -224,56 +245,64 @@ void publishMqttState() {
     ensureMqttConnected();
   }
 
-  float temp = dht.readTemperature();
-  float hum  = dht.readHumidity(); 
+  sensors_event_t humidity, temp;
+  aht.getEvent(&humidity, &temp);
+
+  float pressure = bmp.readPressure() / 100.0F; // hPa
 
   String payload = "{";
   payload += "\"state\":\"" + state + "\",";
-  payload +=  "\"temperature\":\"" + String(temp) + "\",";
-  payload +=  "\"humidity\":\"" + String(hum) + "\"";
+  payload +=  "\"temp\":\"" + String(temp.temperature) + "\",";
+  payload +=  "\"pressure\":\"" + String(pressure) + "\",";
+  payload +=  "\"humidity\":\"" + String(humidity.relative_humidity) + "\"";
   payload += "}";
 
   mqttClient.publish(mqttTopic.c_str(), payload.c_str());
 }
+*/
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(5000);
   Serial.println("\nBooting...");
 
-  // Configure relay pins
+  // Start filesystem
+  //if (!LittleFS.begin()) {
+  //  Serial.println("LittleFS mount failed");
+  //}
+
+  Wire.begin(D2, D1);
+
+  aht.begin();
+  bmp.begin(0x77);
+  
+  /*// Configure relay pins
   pinMode(PIN_RELAY_OPEN, OUTPUT);
   pinMode(PIN_RELAY_CLOSE, OUTPUT);
-  pinMode(PIN_RELAY_TOGGLE, OUTPUT);
-  pinMode(PIN_RELAY_PEDESTRIAN, OUTPUT);
 
   digitalWrite(PIN_RELAY_OPEN, LOW);
   digitalWrite(PIN_RELAY_CLOSE, LOW);
-  digitalWrite(PIN_RELAY_TOGGLE, LOW);
-  digitalWrite(PIN_RELAY_PEDESTRIAN, LOW);
-
-  dht.begin();
+  */
 
   // MQTT config
-  prefs.begin("mqtt", false);
-  loadMqttConfig();
+  //prefs.begin("mqtt", false);
+  //loadMqttConfig();
 
   // WiFi via WiFiManager
   setupWiFi();
 
   // MQTT client setup
-  if (mqttServer.length() > 0) {
-    mqttClient.setServer(mqttServer.c_str(), mqttPort);
-  }
+  //if (mqttServer.length() > 0) {
+  //  mqttClient.setServer(mqttServer.c_str(), mqttPort);
+  //}
 
-  // REST API
   setupWebServer();
 }
 
 void loop() {
   // Non-blocking main loop; AsyncWebServer handles HTTP in background
 
-  if (mqttServer.length() == 0) {
+ /* if (mqttServer.length() == 0) {
     return;
   }
 
@@ -286,5 +315,22 @@ void loop() {
   if (now - lastMqttPublish >= mqttDelay) {
     publishMqttState();
     lastMqttPublish = now;
-  }  
+  }  */
+
+  /*sensors_event_t humidity, temp;
+  aht.getEvent(&humidity, &temp);
+
+  float pressure = bmp.readPressure() / 100.0F; // hPa
+
+  String payload = "{";
+  payload += "\"state\":\"" + state + "\",";
+  payload +=  "\"temp\":\"" + String(temp.temperature) + "\",";
+  payload +=  "\"pressure\":\"" + String(pressure) + "\",";
+  payload +=  "\"humidity\":\"" + String(humidity.relative_humidity) + "\"";
+  payload += "}";
+
+  Serial.println(payload);
+
+  delay(1000);*/
+ 
 }
