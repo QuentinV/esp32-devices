@@ -7,15 +7,11 @@
 #include <PubSubClient.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
-#include <DHT.h>
+#include <Wire.h> 
+#include <Adafruit_AHTX0.h> 
+#include <Adafruit_BMP280.h>
 
-#define PIN_RELAY_OPEN       2
-#define PIN_RELAY_CLOSE      3
-#define PIN_RELAY_TOGGLE     4
-#define PIN_RELAY_PEDESTRIAN 5
-
-#define DHTPIN GPIO_NUM_14
-#define DHTTYPE DHT22
+#define PIN_RELAY_TOGGLE     2
 
 const unsigned long RELAY_PULSE_MS = 500; //ms
 
@@ -30,29 +26,23 @@ uint16_t mqttDelay = 30; // milli
 
 unsigned long lastMqttPublish = 0;
 
+WiFiManager wm;
 AsyncWebServer server(80);
-String state = "closed";
 
-DHT dht(DHTPIN, DHTTYPE);
+Adafruit_AHTX0 aht; 
+Adafruit_BMP280 bmp;
 
 void setupWiFi() {
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
 
-  WiFiManager wm;
   wm.setConfigPortalBlocking(true);
   wm.setDebugOutput(true);
 
   bool res = wm.autoConnect("GateConfig", "GateConfig123");
 
   if (!res) {
-    Serial.println("Failed to connect, restarting...");
     delay(3000);
     ESP.restart();
-  } else {
-    Serial.print("Connected to WiFi: ");
-    Serial.println(WiFi.SSID());
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
   }
 }
 
@@ -60,17 +50,6 @@ void loadMqttConfig() {
   mqttServer = prefs.getString("server", "");
   mqttPort   = prefs.getUShort("port", 1883);
   mqttTopic  = prefs.getString("topic", "gate/state");
-
-  Serial.println("Loaded MQTT config:");
-  Serial.print("  server: "); Serial.println(mqttServer);
-  Serial.print("  port  : "); Serial.println(mqttPort);
-  Serial.print("  topic : "); Serial.println(mqttTopic);
-}
-
-void pulseRelay(int pin) {
-  digitalWrite(pin, HIGH);
-  delay(RELAY_PULSE_MS);  // this is blocking; you can make it non-blocking later
-  digitalWrite(pin, LOW);
 }
 
 void setupWebServer() {
@@ -78,69 +57,43 @@ void setupWebServer() {
     request->send(code, "application/json", body);
   };
 
-  // ---- Sned command ----
-  // { "command": "open" | "close" | "toggle" | "pedestrian" }
-  server.on("/state", HTTP_POST,
-    [](AsyncWebServerRequest *request){},
-    nullptr,
-    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-
-      // Parse JSON
-      JsonDocument doc;
-      DeserializationError err = deserializeJson(doc, data, len);
-
-      if (err) {
-        request->send(400, "application/json", "{\"error\":\"invalid JSON\"}");
-        return;
-      }
-
-      if (!doc.containsKey("command")) {
-        request->send(400, "application/json", "{\"error\":\"missing command\"}");
-        return;
-      }
-
-      String command = doc["command"].as<String>();
-      command.toLowerCase();
-
-      if (command == "open") {
-        pulseRelay(PIN_RELAY_OPEN);
-        state = "opened";
-      } else if (command == "close") {
-        pulseRelay(PIN_RELAY_CLOSE);
-        state = "closed";
-      } else if (command == "toggle") {
-        pulseRelay(PIN_RELAY_TOGGLE);
-        state = state == "opened" ? "closed" : "opened";
-      } else if (command == "pedestrian") {
-        pulseRelay(PIN_RELAY_PEDESTRIAN);
-        state = "pedestrian";
-      } else {
-        request->send(400, "application/json", "{\"error\":\"unknown command\"}");
-        return;
-      }
-
-      request->send(204);
+  server.on("/state/toggle", HTTP_POST, [](AsyncWebServerRequest *request) {
+      digitalWrite(PIN_RELAY_TOGGLE, HIGH);
+      delay(RELAY_PULSE_MS);
+      digitalWrite(PIN_RELAY_TOGGLE, LOW);
+      request->send(200, "application/text", "");
     }
   );
 
-  server.on("/state", HTTP_GET, 
-    [](AsyncWebServerRequest *request){},
-    nullptr,
-    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      JsonDocument resp; 
-      resp["state"] = state;
-      String out; serializeJson(resp, out);
+  server.on("/state", HTTP_GET, [](AsyncWebServerRequest *request) {
+      sensors_event_t humidity, temp;
+      aht.getEvent(&humidity, &temp);
+      
+      JsonDocument resp;
+      resp["hum"] = String(humidity.relative_humidity);
+      resp["aht_temp"] = String(temp.temperature);
+      resp["bmp_temp"] = String(bmp.readTemperature());
+      resp["pressure"] = String(bmp.readPressure() / 100.0F);
+
+      String out; 
+      serializeJson(resp, out);
       request->send(200, "application/json", out);
-    });
+  });
 
-  // ---- MQTT config ----
+  server.on("/config/mqtt", HTTP_GET, [](AsyncWebServerRequest *request) {
+      JsonDocument resp; 
+      resp["server"] = mqttServer; 
+      resp["port"] = mqttPort; 
+      resp["topic"] = mqttTopic; 
+      resp["delay"] = mqttDelay;
+      String out; 
+      serializeJson(resp, out);
+      request->send(200, "application/json", out);
+    }
+  );
+
   // {"server":"192.168.1.10","port":1883,"topic":"gate/state"}
-  server.on("/config/mqtt", HTTP_POST,
-    [](AsyncWebServerRequest *request){},
-    nullptr,
-    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-
-      // Parse JSON body
+  server.on("/config/mqtt", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
       JsonDocument doc;
       DeserializationError err = deserializeJson(doc, data, len);
 
@@ -149,7 +102,6 @@ void setupWebServer() {
         return;
       }
 
-      // Validate required fields
       if (!doc.containsKey("server") ||
           !doc.containsKey("port") ||
           !doc.containsKey("topic")) {
@@ -169,31 +121,22 @@ void setupWebServer() {
 
       mqttClient.setServer(mqttServer.c_str(), mqttPort);
 
-      request->send(204);
+      request->send(200, "application/text", "");
     }
   );
-
-  server.on("/config/mqtt", HTTP_GET,
-    [](AsyncWebServerRequest *request){},
-    nullptr,
-    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      JsonDocument resp; 
-      resp["server"] = mqttServer; 
-      resp["port"] = mqttPort; 
-      resp["topic"] = mqttTopic; 
-      resp["delay"] = mqttDelay;
-      String out; 
-      serializeJson(resp, out);
-      request->send(200, "application/json", out);
+  
+  server.on("/reset/wifi", HTTP_GET, [](AsyncWebServerRequest *req){
+      req->send(200, "text/plain", "Ok");
+      wm.resetSettings();
+      ESP.restart();
     }
   );
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", "Available api: POST /state { 'command': 'open' | 'close' | 'toggle' | 'pedestrian' } or POST /config/mqtt {'server':'192.168.1.10','port':1883,'topic':'gate/state'}");
+    request->send(200, "text/plain", "Available api: GET /reset/wifi ; POST /state/toggle; GET /state ; POST /config/mqtt {'server':'192.168.1.10','port':1883,'topic':'gate/state'}");
   });
 
   server.begin();
-  Serial.println("HTTP server started.");
 }
 
 void ensureMqttConnected() {
@@ -201,20 +144,9 @@ void ensureMqttConnected() {
 
   if (mqttClient.connected()) return;
 
-  Serial.print("Connecting to MQTT: ");
-  Serial.print(mqttServer);
-  Serial.print(":");
-  Serial.println(mqttPort);
-
-  String clientId = "gate-";
-  clientId += String((uint32_t)ESP.getEfuseMac(), HEX);
-
-  if (mqttClient.connect(clientId.c_str())) {
-    Serial.println("MQTT connected.");
-  } else {
-    Serial.print("MQTT connect failed, rc=");
-    Serial.println(mqttClient.state());
-    delay(1000);
+  String clientId = "gate-toggle-1";
+  if (!mqttClient.connect(clientId.c_str())) {
+    delay(60000);
   }
 }
 
@@ -224,55 +156,44 @@ void publishMqttState() {
     ensureMqttConnected();
   }
 
-  float temp = dht.readTemperature();
-  float hum  = dht.readHumidity(); 
+  sensors_event_t humidity, temp;
+  aht.getEvent(&humidity, &temp);
+
+  float pressure = bmp.readPressure() / 100.0F; // hPa
 
   String payload = "{";
-  payload += "\"state\":\"" + state + "\",";
-  payload +=  "\"temperature\":\"" + String(temp) + "\",";
-  payload +=  "\"humidity\":\"" + String(hum) + "\"";
+  payload +=  "\"temp\":\"" + String(temp.temperature) + "\",";
+  payload +=  "\"pressure\":\"" + String(pressure) + "\",";
+  payload +=  "\"humidity\":\"" + String(humidity.relative_humidity) + "\"";
   payload += "}";
 
   mqttClient.publish(mqttTopic.c_str(), payload.c_str());
 }
 
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("\nBooting...");
-
-  // Configure relay pins
-  pinMode(PIN_RELAY_OPEN, OUTPUT);
-  pinMode(PIN_RELAY_CLOSE, OUTPUT);
+  delay(2000);
+  
   pinMode(PIN_RELAY_TOGGLE, OUTPUT);
-  pinMode(PIN_RELAY_PEDESTRIAN, OUTPUT);
-
-  digitalWrite(PIN_RELAY_OPEN, LOW);
-  digitalWrite(PIN_RELAY_CLOSE, LOW);
   digitalWrite(PIN_RELAY_TOGGLE, LOW);
-  digitalWrite(PIN_RELAY_PEDESTRIAN, LOW);
 
-  dht.begin();
+  Wire.begin(9, 8);
 
-  // MQTT config
+  aht.begin();
+  bmp.begin(0x77);
+
   prefs.begin("mqtt", false);
   loadMqttConfig();
 
-  // WiFi via WiFiManager
   setupWiFi();
 
-  // MQTT client setup
   if (mqttServer.length() > 0) {
     mqttClient.setServer(mqttServer.c_str(), mqttPort);
   }
 
-  // REST API
   setupWebServer();
 }
 
 void loop() {
-  // Non-blocking main loop; AsyncWebServer handles HTTP in background
-
   if (mqttServer.length() == 0) {
     return;
   }
@@ -286,5 +207,5 @@ void loop() {
   if (now - lastMqttPublish >= mqttDelay) {
     publishMqttState();
     lastMqttPublish = now;
-  }  
+  } 
 }
