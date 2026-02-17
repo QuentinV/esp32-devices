@@ -1,0 +1,14 @@
+{
+  "folders": [
+    {
+      "name": "garage_door",
+      "path": "./",
+    },
+  ],
+  "settings": {
+    "files.associations": {
+      "new": "cpp",
+      "stdexcept": "cpp",
+    },
+  },
+}
