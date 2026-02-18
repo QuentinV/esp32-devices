@@ -8,13 +8,20 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <Wire.h> 
+#include <VL53L0X.h>
 
-#define PIN_RELAY_TOGGLE     6
-#define PIN_MOTION_SENSOR    5
+#define PIN_LASER_SDA        8
+#define PIN_LASER_SCL        6
+#define PIN_RELAY_TOGGLE     5
+
+#define LASER_INTERVAL 3000
+#define LASER_DETECT_RANGE 500
 
 #define MQTT_CLIENT_ID "garagedoor-toggle-1"
 
 const unsigned long RELAY_PULSE_MS = 500; //ms
+unsigned long lastLaserCheck = 0;
+bool lastState = false;
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
@@ -23,11 +30,11 @@ Preferences prefs;
 String mqttServer = "";
 uint16_t mqttPort = 1883;
 String mqttTopic = "";
-
-int lastState = 0;
+uint16_t distance = 0;
 
 WiFiManager wm;
 AsyncWebServer server(80);
+VL53L0X sensor;
 
 void setupWiFi() {
   WiFi.mode(WIFI_AP_STA);
@@ -53,6 +60,16 @@ void setupWebServer() {
   auto sendJson = [](AsyncWebServerRequest *request, int code, const String &body) {
     request->send(code, "application/json", body);
   };
+
+  server.on("/state", HTTP_GET, [](AsyncWebServerRequest *request) {
+      JsonDocument resp; 
+      resp["value"] = lastState; 
+      resp["distance"] = distance;
+      String out; 
+      serializeJson(resp, out);
+      request->send(200, "application/json", out);
+    }
+  );
 
   server.on("/state/toggle", HTTP_POST, [](AsyncWebServerRequest *request) {
       digitalWrite(PIN_RELAY_TOGGLE, HIGH);
@@ -153,11 +170,8 @@ void setup() {
   pinMode(PIN_RELAY_TOGGLE, OUTPUT);
   digitalWrite(PIN_RELAY_TOGGLE, LOW);
 
-  pinMode(PIN_MOTION_SENSOR, INPUT_PULLDOWN);
-  
   prefs.begin("mqtt", false);
   loadMqttConfig();
-
   
   setupWiFi();
 
@@ -165,7 +179,17 @@ void setup() {
     mqttClient.setServer(mqttServer.c_str(), mqttPort);
   }
 
+  Wire.begin(PIN_LASER_SDA, PIN_LASER_SCL, 100000);
+  if (!sensor.init()) {
+    Serial.println("Failed to detect VL53L0X!");
+    while (1);
+  }
+
+  sensor.setTimeout(500);
+  //sensor.startContinuous();
+
   setupWebServer();  
+  
 }
 
 void loop() {
@@ -179,12 +203,21 @@ void loop() {
   }
   mqttClient.loop();
 
-  int read = digitalRead(PIN_MOTION_SENSOR);
-  //Serial.print("reading motion sensor");
-  if (lastState != read) {
-      lastState = read;
-      publishMqttState(read == 1);
-  }  
+  unsigned long now = millis();
+  if (now - lastLaserCheck >= LASER_INTERVAL) {
+      lastLaserCheck = now;
+
+      distance = sensor.readRangeSingleMillimeters();
+      if (!sensor.timeoutOccurred() ) {
+          bool opened = distance <= LASER_DETECT_RANGE;
+          bool diff = opened != lastState;
+          lastState = opened;
+          if (diff) {
+            publishMqttState(opened);
+          }
+          
+      }
+  }
 
   delay(50);
 }
