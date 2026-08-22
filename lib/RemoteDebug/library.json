@@ -1,0 +1,18 @@
+{
+    "name": "RemoteDebug",
+    "version": "3.0.5",
+    "description": "Remote debug over telnet for ESP8266/ESP32 (WebSocket support removed for ESP8266 core compatibility)",
+    "keywords": "debug, telnet, remote",
+    "authors": [
+        {
+            "name": "Joao Lopes",
+            "maintainer": true
+        }
+    ],
+    "license": "MIT",
+    "frameworks": "arduino",
+    "platforms": [
+        "espressif8266",
+        "espressif32"
+    ]
+}

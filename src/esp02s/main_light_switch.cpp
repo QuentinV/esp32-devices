@@ -7,8 +7,8 @@
 #include <PubSubClient.h>
 
 // ── Pin configuration ────────────────────────────
-#define PIN_RELAY   4   // GPIO4 → relay (light)
-#define PIN_SWITCH  5   // GPIO5 → physical switch (GND when pressed)
+#define PIN_RELAY   10   // relay (light)
+#define PIN_SWITCH  4   // physical switch (GND when pressed)
 
 // ── Physical switch debounce ─────────────────────
 #define DEBOUNCE_MS   50
