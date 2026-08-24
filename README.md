@@ -100,3 +100,100 @@ telnet <device-ip> 23
 
 Once connected, type `help` to see available commands (set debug level, reset
 the device, etc.). Output is also mirrored to the serial monitor.
+
+---
+
+## ESP-02S Shutter Controller
+
+A shutter/roller-blind controller for the ESP-02S (ESP8266). In addition to its
+WiFi + mDNS + MQTT + REST API it supports OTA flashing over WiFi and remote
+debugging over telnet (same setup as the Starter template).
+
+### Features
+
+| Feature        | Details                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| WiFi           | WiFiManager captive-portal, persisted credentials                |
+| mDNS           | Advertised as `http://esp-shutter-<chipid>.local`                |
+| OTA            | ArduinoOTA — flash over WiFi from PlatformIO or Arduino IDE      |
+| Remote debug   | RemoteDebug library — live logs over telnet (port 23)            |
+| MQTT           | PubSubClient — command/state topics, config saved in EEPROM      |
+| REST API       | `/state`, `/move`, `/pause`, `/home`, `/calibrate`, `/config/mqtt` |
+
+### Build & flash (serial)
+
+```bash
+pio run -e shutter_esp02s -t upload
+```
+
+### Flash over WiFi (OTA)
+
+First flash the device over serial once (see above). After that, the device
+advertises itself via ArduinoOTA. To flash over WiFi:
+
+```bash
+pio run -e shutter_esp02s_ota -t upload --upload-port <device-ip>
+```
+
+The device IP is printed on boot (serial), or query it via
+`http://esp-shutter-<chipid>.local/state`.
+
+### Remote debugging (telnet)
+
+Connect to the device's telnet server to see live debug output:
+
+```bash
+telnet <device-ip> 23
+```
+
+Once connected, type `help` to see available commands (set debug level, reset
+the device, etc.). Output is mirrored to the serial monitor as well.
+
+---
+
+## ESP-02S Light Switch
+
+A single light / relay controller for the ESP-02S (ESP8266). In addition to its
+WiFi + mDNS + MQTT + REST API it supports OTA flashing over WiFi and remote
+debugging over telnet (same setup as the Starter template).
+
+### Features
+
+| Feature        | Details                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| WiFi           | WiFiManager captive-portal, persisted credentials                |
+| mDNS           | Advertised as `http://esp-light-<chipid>.local`                  |
+| OTA            | ArduinoOTA — flash over WiFi from PlatformIO or Arduino IDE      |
+| Remote debug   | RemoteDebug library — live logs over telnet (port 23)            |
+| MQTT           | PubSubClient — publish state, config saved in EEPROM             |
+| REST API       | `/state`, `/toggle`, `/config/mqtt`, `/reset/wifi`              |
+| Physical input | Debounced switch (GPIO 4, active LOW) toggles the relay locally  |
+
+### Build & flash (serial)
+
+```bash
+pio run -e light_switch -t upload
+```
+
+### Flash over WiFi (OTA)
+
+First flash the device over serial once (see above). After that, the device
+advertises itself via ArduinoOTA. To flash over WiFi:
+
+```bash
+pio run -e light_switch_esp02s_ota -t upload --upload-port <device-ip>
+```
+
+The device IP is printed on boot (serial), or query it via
+`http://esp-light-<chipid>.local/`.
+
+### Remote debugging (telnet)
+
+Connect to the device's telnet server to see live debug output:
+
+```bash
+telnet <device-ip> 23
+```
+
+Once connected, type `help` to see available commands (set debug level, reset
+the device, etc.). Output is mirrored to the serial monitor as well.

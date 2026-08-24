@@ -5,6 +5,8 @@
 #include <ArduinoJson.h>
 #include <EEPROM.h>
 #include <PubSubClient.h>
+#include <ArduinoOTA.h>
+#include <RemoteDebug.h>
 
 // ── Pin configuration ────────────────────────────
 #define PIN_TOUCH_UP      14   // touch sensor (HIGH when touched)
@@ -34,6 +36,7 @@
 ESP8266WebServer server(80);
 WiFiClient       espClient;
 PubSubClient     mqtt(espClient);
+RemoteDebug      Debug;   // telnet remote debugger (port 23)
 
 // Shutter state
 enum ShutterState { IDLE, MOVING_UP, MOVING_DOWN };
@@ -102,13 +105,13 @@ void setRelays(bool enable, bool direction) {
         // Soft stop: direction off first, then enable
         digitalWrite(PIN_RELAY_DIR, LOW);
         digitalWrite(PIN_RELAY_ENABLE, LOW);
-        Serial.println("[RELAY] STOP (both off)");
+        Debug.println("[RELAY] STOP (both off)");
         return;
     }
     digitalWrite(PIN_RELAY_DIR, direction ? HIGH : LOW);
     delay(RELAY_SETTLE_MS);
     digitalWrite(PIN_RELAY_ENABLE, HIGH);
-    Serial.printf("[RELAY] %s (enable=ON, dir=%s)\n",
+    Debug.printf("[RELAY] %s (enable=ON, dir=%s)\n",
         direction ? "UP" : "DOWN", direction ? "ON" : "OFF");
 }
 
@@ -116,7 +119,7 @@ void stopShutter() {
     setRelays(false, false);
     shutterState = IDLE;
     stallStart = 0;
-    Serial.println("[SHUTTER] Stopped");
+    Debug.println("[SHUTTER] Stopped");
     mqttPublishState();
 }
 
@@ -137,7 +140,7 @@ void moveTo(bool up) {
     stallStart = 0;
     moveBaseline = 0.0f;
     baselineSamples = 0;
-    Serial.printf("[SHUTTER] Moving %s\n", up ? "UP" : "DOWN");
+    Debug.printf("[SHUTTER] Moving %s\n", up ? "UP" : "DOWN");
     mqttPublishState();
 }
 
@@ -251,25 +254,25 @@ void mqttPublishState() {
 
     if (mqttStateTopic.length() > 0) {
         mqtt.publish(mqttStateTopic.c_str(), payload.c_str(), true);
-        Serial.printf("[MQTT] Published to %s: %s\n", mqttStateTopic.c_str(), payload.c_str());
+        Debug.printf("[MQTT] Published to %s: %s\n", mqttStateTopic.c_str(), payload.c_str());
     }
 }
 
 void mqttReconnect() {
     if (mqttServer.length() == 0) return;
 
-    Serial.printf("[MQTT] Connecting to %s:%d as %s ...\n",
+    Debug.printf("[MQTT] Connecting to %s:%d as %s ...\n",
         mqttServer.c_str(), mqttPort, mqttClientId.c_str());
 
     if (mqtt.connect(mqttClientId.c_str())) {
-        Serial.println("[MQTT] Connected");
+        Debug.println("[MQTT] Connected");
         if (mqttTopic.length() > 0) {
             mqtt.subscribe(mqttTopic.c_str());
-            Serial.printf("[MQTT] Subscribed to %s\n", mqttTopic.c_str());
+            Debug.printf("[MQTT] Subscribed to %s\n", mqttTopic.c_str());
         }
         mqttPublishState();
     } else {
-        Serial.printf("[MQTT] Failed, rc=%d\n", mqtt.state());
+        Debug.printf("[MQTT] Failed, rc=%d\n", mqtt.state());
     }
 }
 
@@ -291,7 +294,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
     String msg;
     for (unsigned int i = 0; i < len; i++) msg += (char)payload[i];
     msg.toUpperCase();
-    Serial.printf("[MQTT] Command: %s\n", msg.c_str());
+    Debug.printf("[MQTT] Command: %s\n", msg.c_str());
 
     if (msg == "UP") {
         moveUp();
@@ -321,7 +324,7 @@ void handleTouch() {
     if ((now - lastDebounceTime) > DEBOUNCE_MS) {
         if (upRaw && !upPressed) {
             upPressed = true;
-            Serial.println("[TOUCH] Up");
+            Debug.println("[TOUCH] Up");
             moveUp();
         } else if (!upRaw) {
             upPressed = false;
@@ -329,7 +332,7 @@ void handleTouch() {
 
         if (downRaw && !downPressed) {
             downPressed = true;
-            Serial.println("[TOUCH] Down");
+            Debug.println("[TOUCH] Down");
             moveDown();
         } else if (!downRaw) {
             downPressed = false;
@@ -337,7 +340,7 @@ void handleTouch() {
 
         if (pauseRaw && !pausePressed) {
             pausePressed = true;
-            Serial.println("[TOUCH] Pause");
+            Debug.println("[TOUCH] Pause");
             stopShutter();
         } else if (!pauseRaw) {
             pausePressed = false;
@@ -380,7 +383,7 @@ void checkStall() {
         if (stallStart == 0) {
             stallStart = millis();
         } else if (millis() - stallStart >= STALL_HOLD_MS) {
-            Serial.println("[SHUTTER] End-of-course detected (current spike)");
+            Debug.println("[SHUTTER] End-of-course detected (current spike)");
             // Update tracked position in RAM (no EEPROM write)
             position = (shutterState == MOVING_UP) ? 100 : 0;
             positionValid = true;
@@ -422,6 +425,47 @@ void setupMDNS() {
     }
 }
 
+// ── OTA setup (ArduinoOTA) ───────────────────────
+// Allows flashing over WiFi from PlatformIO or the Arduino IDE.
+//   PlatformIO:  pio run -e shutter_esp02s_ota -t upload --upload-port <ip>
+void setupOTA() {
+    // Unique hostname from last 4 hex chars of chip ID
+    uint32_t chipId = ESP.getChipId();
+    String hostname = "esp-shutter-" + String(chipId & 0xFFFF, HEX);
+    ArduinoOTA.setHostname(hostname.c_str());
+
+    ArduinoOTA.onStart([]() {
+        Serial.println("[OTA] Start");
+    });
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\n[OTA] End");
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("[OTA] Progress: %u%%\r", (progress / (total / 100)));
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("[OTA] Error[%u]: ", error);
+        if (error == OTA_AUTH_ERROR)      Serial.println("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+        else if (error == OTA_END_ERROR)   Serial.println("End Failed");
+    });
+
+    ArduinoOTA.begin();
+    Serial.println("[OTA] Ready (ArduinoOTA)");
+}
+
+// ── Remote debug setup (telnet) ─────────────────
+// Connect with any telnet client:  telnet <ip> 23
+// Commands: help, debug level, etc. (type "help" once connected)
+void setupRemoteDebug() {
+    Debug.begin("esp-shutter");   // hostname shown in the telnet banner
+    Debug.setResetCmdEnabled(true);  // allow "reset" command from telnet
+    Debug.setSerialEnabled(true);    // mirror output to serial monitor
+    Serial.println("[DEBUG] RemoteDebug ready on port 23 (telnet)");
+}
+
 // ── Web Server ───────────────────────────────────
 void setupWebServer() {
     // GET / → help text
@@ -434,6 +478,8 @@ void setupWebServer() {
         help += "POST /calibrate        → capture ADC zero-current offset\n";
         help += "GET  /reset/wifi       → reset WiFi and restart\n";
         help += "POST /config/mqtt      → {\"server\":\"\",\"port\":1883,\"topic\":\"\",\"state_topic\":\"\"}\n";
+        help += "\nOTA: flash over WiFi via ArduinoOTA (see README)\n";
+        help += "Debug: telnet to this device on port 23\n";
         help += "\nmDNS: http://esp-shutter-" + String((uint32_t)ESP.getChipId() & 0xFFFF, HEX) + ".local\n";
         sendJSON(200, help);
     });
@@ -523,7 +569,7 @@ void setupWebServer() {
         delay(100);
         adcOffset = readAdcFiltered();
         saveAdcOffset(adcOffset);
-        Serial.printf("[CALIBRATE] ADC offset = %.1f\n", adcOffset);
+        Debug.printf("[CALIBRATE] ADC offset = %.1f\n", adcOffset);
         sendJSON(200, "{\"adc_offset\":" + String(adcOffset) + "}");
     });
 
@@ -581,7 +627,7 @@ void setupWebServer() {
     });
 
     server.begin();
-    Serial.println("[HTTP] Server started");
+    Debug.println("[HTTP] Server started");
 }
 
 // ── Setup ────────────────────────────────────────
@@ -621,6 +667,12 @@ void setup() {
     // mDNS
     setupMDNS();
 
+    // OTA
+    setupOTA();
+
+    // Remote debug (telnet)
+    setupRemoteDebug();
+
     // MQTT callback
     mqtt.setCallback(mqttCallback);
 
@@ -632,6 +684,8 @@ void setup() {
 void loop() {
     server.handleClient();
     MDNS.update();
+    ArduinoOTA.handle();
+    Debug.handle();
     mqttLoop();
 
     // Poll touch sensors (debounced)
