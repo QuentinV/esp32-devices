@@ -5,10 +5,12 @@
 #include <ArduinoJson.h>
 #include <EEPROM.h>
 #include <PubSubClient.h>
+#include <ArduinoOTA.h>
+#include <RemoteDebug.h>
 
 // ── Pin configuration ────────────────────────────
-#define PIN_RELAY   4   // GPIO4 → relay (light)
-#define PIN_SWITCH  5   // GPIO5 → physical switch (GND when pressed)
+#define PIN_RELAY   12   // relay (light)
+#define PIN_SWITCH  4   // physical switch (GND when pressed)
 
 // ── Physical switch debounce ─────────────────────
 #define DEBOUNCE_MS   50
@@ -18,6 +20,7 @@
 ESP8266WebServer server(80);
 WiFiClient       espClient;
 PubSubClient     mqtt(espClient);
+RemoteDebug      Debug;   // telnet remote debugger (port 23)
 
 // Lights state
 bool lightOn   = false;     // current relay state
@@ -53,6 +56,7 @@ void setRelay(bool on) {
     lightOn = on;
     digitalWrite(PIN_RELAY, on ? HIGH : LOW);
     Serial.printf("[RELAY] Light %s\n", on ? "ON" : "OFF");
+    Debug.printf("[RELAY] Light %s\n", on ? "ON" : "OFF");
 }
 
 void toggleRelay() {
@@ -204,47 +208,69 @@ void setupMDNS() {
     }
 }
 
+// ── OTA setup (ArduinoOTA) ───────────────────────
+// Allows flashing over WiFi from PlatformIO or the Arduino IDE.
+//   PlatformIO:  pio run -e light_switch_esp02s_ota -t upload --upload-port <ip>
+void setupOTA() {
+    // Unique hostname from last 4 hex chars of chip ID
+    uint32_t chipId = ESP.getChipId();
+    String hostname = "esp-light-" + String(chipId & 0xFFFF, HEX);
+    ArduinoOTA.setHostname(hostname.c_str());
+
+    ArduinoOTA.onStart([]() {
+        Serial.println("[OTA] Start");
+    });
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\n[OTA] End");
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("[OTA] Progress: %u%%\r", (progress / (total / 100)));
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("[OTA] Error[%u]: ", error);
+        if (error == OTA_AUTH_ERROR)      Serial.println("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+        else if (error == OTA_END_ERROR)   Serial.println("End Failed");
+    });
+
+    ArduinoOTA.begin();
+    Serial.println("[OTA] Ready (ArduinoOTA)");
+}
+
+// ── Remote debug setup (telnet) ─────────────────
+// Connect with any telnet client:  telnet <ip> 23
+// Commands: help, debug level, etc. (type "help" once connected)
+void setupRemoteDebug() {
+    Debug.begin("esp-light");   // hostname shown in the telnet banner
+    Debug.setResetCmdEnabled(true);  // allow "reset" command from telnet
+    Debug.setSerialEnabled(true);    // mirror output to serial monitor
+    Serial.println("[DEBUG] RemoteDebug ready on port 23 (telnet)");
+}
+
 // ── Web Server ───────────────────────────────────
 void setupWebServer() {
     // GET / → help text
     server.on("/", HTTP_GET, []() {
         String help = "ESP Light Switch REST API\n\n";
         help += "GET  /             → this help\n";
-        help += "GET  /state?id=0   → light state\n";
-        help += "POST /toggle?id=0&set=0|1 → toggle or set light\n";
+        help += "GET  /state   → light state\n";
+        help += "POST /toggle?set=0|1 → toggle or set light\n";
         help += "GET  /reset/wifi   → reset WiFi and restart\n";
         help += "POST /config/mqtt  → {\"server\":\"\",\"port\":1883,\"topic\":\"\"}\n";
         help += "\nmDNS: http://esp-light-" + String((uint32_t)ESP.getChipId() & 0xFFFF, HEX) + ".local\n";
         sendJSON(200, help);
     });
 
-    // GET /state?id=0 → get light state
+    // GET /state → get light state
     server.on("/state", HTTP_GET, []() {
-        if (!server.hasArg("id")) {
-            sendJSON(400, "{\"error\":\"missing parameter id\"}");
-            return;
-        }
-        String id = server.arg("id");
-        if (id != "0") {
-            sendJSON(400, "{\"error\":\"invalid id\"}");
-            return;
-        }
-        String state = lightOn ? "high" : "low";
+        String state = lightOn ? "on" : "off";
         sendJSON(200, "{\"state\":\"" + state + "\"}");
     });
 
-    // POST /toggle?id=0&set=0|1 → toggle or set light
+    // POST /toggle?set=0|1 → toggle or set light
     server.on("/toggle", HTTP_POST, []() {
-        if (!server.hasArg("id")) {
-            sendJSON(400, "{\"error\":\"missing parameter id\"}");
-            return;
-        }
-        String id = server.arg("id");
-        if (id != "0") {
-            sendJSON(400, "{\"error\":\"invalid id\"}");
-            return;
-        }
-
         if (server.hasArg("set")) {
             int target = server.arg("set").toInt();
             setRelay(target == 1);
@@ -252,7 +278,7 @@ void setupWebServer() {
             toggleRelay();
         }
 
-        String state = lightOn ? "high" : "low";
+        String state = lightOn ? "on" : "off";
         sendJSON(200, "{\"state\":\"" + state + "\"}");
 
         mqttPublishState();
@@ -338,6 +364,12 @@ void setup() {
     // mDNS
     setupMDNS();
 
+    // OTA
+    setupOTA();
+
+    // Remote debug (telnet)
+    setupRemoteDebug();
+
     // Web server
     setupWebServer();
 }
@@ -346,6 +378,8 @@ void setup() {
 void loop() {
     server.handleClient();
     MDNS.update();
+    ArduinoOTA.handle();
+    Debug.handle();
     mqttLoop();
 
     // Poll physical switch (using poll instead of interrupt for simplicity/robustness)
