@@ -12,7 +12,7 @@
 #define PIN_TOUCH_UP      14   // touch sensor (HIGH when touched)
 #define PIN_TOUCH_PAUSE   12   // touch sensor (HIGH when touched)
 #define PIN_TOUCH_DOWN    5    // touch sensor (HIGH when touched)
-#define PIN_RELAY_ENABLE  3    // enable relay (must be ON first)
+#define PIN_RELAY_ENABLE  13    // enable relay (must be ON first)
 #define PIN_RELAY_DIR     4    // direction relay (ON=UP, OFF=DOWN)
 #define PIN_ADC           A0   // ACS712 current sensor (0-1V via divider)
 
