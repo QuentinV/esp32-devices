@@ -21,6 +21,7 @@ ESP8266WebServer server(80);
 WiFiClient       espClient;
 PubSubClient     mqtt(espClient);
 RemoteDebug      Debug;   // telnet remote debugger (port 23)
+String           deviceKey;
 
 // Lights state
 bool lightOn   = false;     // current relay state
@@ -87,7 +88,7 @@ void loadMqttConfig() {
 
     // Fallback client ID
     if (mqttClientId.length() == 0) {
-        mqttClientId = "esp-light-" + String((uint32_t)ESP.getChipId(), HEX);
+        mqttClientId = deviceKey;
     }
 
     if (mqttServer.length() > 0) {
@@ -119,7 +120,8 @@ void mqttPublishState() {
     if (mqttServer.length() == 0) return;
     if (!mqtt.connected()) return;
 
-    String payload = lightOn ? "ON" : "OFF";
+    String power = lightOn ? "ON" : "OFF";
+    String payload = "{\"externalId\":\"" + deviceKey + "\",\"power\":\"" + power + "\"}";
     if (mqttTopic.length() > 0) {
         mqtt.publish(mqttTopic.c_str(), payload.c_str());
         Serial.printf("[MQTT] Published %s to %s\n", payload.c_str(), mqttTopic.c_str());
@@ -182,9 +184,7 @@ void setupWiFi() {
     wm.setDebugOutput(true);
 
     // Build unique AP name from MAC
-    String apName = "ESP-Light-" + String((uint32_t)ESP.getChipId(), HEX);
-
-    bool res = wm.autoConnect(apName.c_str());
+    bool res = wm.autoConnect(deviceKey.c_str());
     if (!res) {
         Serial.println("[WiFi] Failed to connect, restarting...");
         delay(3000);
@@ -196,9 +196,7 @@ void setupWiFi() {
 
 // ── mDNS setup ───────────────────────────────────
 void setupMDNS() {
-    // Unique hostname from last 4 hex chars of chip ID
-    uint32_t chipId = ESP.getChipId();
-    String hostname = "esp-light-" + String(chipId & 0xFFFF, HEX);
+    String hostname = deviceKey;
 
     if (MDNS.begin(hostname.c_str())) {
         Serial.printf("[mDNS] Advertised as http://%s.local\n", hostname.c_str());
@@ -212,10 +210,7 @@ void setupMDNS() {
 // Allows flashing over WiFi from PlatformIO or the Arduino IDE.
 //   PlatformIO:  pio run -e light_switch_esp02s_ota -t upload --upload-port <ip>
 void setupOTA() {
-    // Unique hostname from last 4 hex chars of chip ID
-    uint32_t chipId = ESP.getChipId();
-    String hostname = "esp-light-" + String(chipId & 0xFFFF, HEX);
-    ArduinoOTA.setHostname(hostname.c_str());
+    ArduinoOTA.setHostname(deviceKey.c_str());
 
     ArduinoOTA.onStart([]() {
         Serial.println("[OTA] Start");
@@ -249,7 +244,6 @@ void setupRemoteDebug() {
     Serial.println("[DEBUG] RemoteDebug ready on port 23 (telnet)");
 }
 
-// ── Web Server ───────────────────────────────────
 void setupWebServer() {
     // GET / → help text
     server.on("/", HTTP_GET, []() {
@@ -259,7 +253,7 @@ void setupWebServer() {
         help += "POST /toggle?set=0|1 → toggle or set light\n";
         help += "GET  /reset/wifi   → reset WiFi and restart\n";
         help += "POST /config/mqtt  → {\"server\":\"\",\"port\":1883,\"topic\":\"\"}\n";
-        help += "\nmDNS: http://esp-light-" + String((uint32_t)ESP.getChipId() & 0xFFFF, HEX) + ".local\n";
+        help += "\nmDNS: http://" + deviceKey + ".local\n";
         sendJSON(200, help);
     });
 
@@ -339,13 +333,14 @@ void setupWebServer() {
     Serial.println("[HTTP] Server started");
 }
 
-// ── Setup ────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     delay(1000);
 
     Serial.println("\n\n=== ESP-02S Light Switch ===");
-
+    deviceKey = "esp-light-" + String(ESP.getChipId() & 0xFFFF, HEX);
+    Serial.println(deviceKey);
+    
     // GPIOs
     pinMode(PIN_RELAY, OUTPUT);
     digitalWrite(PIN_RELAY, LOW);
@@ -355,26 +350,14 @@ void setup() {
     lastSwitchRaw = digitalRead(PIN_SWITCH);
     switchOn = lastSwitchRaw;
 
-    // Load persisted MQTT config
     loadMqttConfig();
-
-    // WIiFi
     setupWiFi();
-
-    // mDNS
     setupMDNS();
-
-    // OTA
     setupOTA();
-
-    // Remote debug (telnet)
     setupRemoteDebug();
-
-    // Web server
     setupWebServer();
 }
 
-// ── Loop ─────────────────────────────────────────
 void loop() {
     server.handleClient();
     MDNS.update();
