@@ -34,6 +34,7 @@ String mqttTopic;
 String mqttClientId;
 
 // Debounce
+bool    lastSwitchRaw = HIGH;   // previous raw reading (for edge/debounce detection)
 unsigned long lastDebounceTime = 0;
 
 // MQTT reconnect throttle
@@ -160,8 +161,8 @@ void handleSwitchInterrupt() {
     bool raw = digitalRead(PIN_SWITCH);
     unsigned long now = millis();
 
-    // Debounce: only act when stable for DEBOUNCE_MS
-    if (raw != lastSwitchState) {
+    if (raw != lastSwitchRaw) {
+        lastSwitchRaw = raw;
         lastDebounceTime = now;
     }
 
@@ -347,7 +348,8 @@ void setup() {
     relayState = false;
 
     pinMode(PIN_SWITCH, INPUT_PULLUP);
-    lastSwitchState = digitalRead(PIN_SWITCH);
+    lastSwitchRaw   = digitalRead(PIN_SWITCH);
+    lastSwitchState = lastSwitchRaw;
 
     loadMqttConfig();
     setupWiFi();
@@ -356,8 +358,9 @@ void setup() {
     setupRemoteDebug();
     setupWebServer();
  
-    lastSwitchState = digitalRead(PIN_SWITCH);;
-    lastDebounceTime = millis();
+    lastSwitchRaw     = digitalRead(PIN_SWITCH);
+    lastSwitchState   = lastSwitchRaw;
+    lastDebounceTime  = millis();
 }
 
 void loop() {
