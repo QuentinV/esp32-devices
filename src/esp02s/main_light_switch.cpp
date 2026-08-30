@@ -24,8 +24,8 @@ RemoteDebug      Debug;   // telnet remote debugger (port 23)
 String           deviceKey;
 
 // Lights state
-bool lightOn   = false;     // current relay state
-bool switchOn  = false;     // last stable switch reading
+bool relayState   = false;     // current relay state
+bool lastSwitchState  = false;     // last stable switch reading
 
 // MQTT config (persisted in EEPROM)
 String mqttServer;
@@ -34,7 +34,6 @@ String mqttTopic;
 String mqttClientId;
 
 // Debounce
-bool    lastSwitchRaw = HIGH;
 unsigned long lastDebounceTime = 0;
 
 // MQTT reconnect throttle
@@ -54,14 +53,14 @@ void sendJSON(int code, const String& payload) {
 
 // ── Relay control ────────────────────────────────
 void setRelay(bool on) {
-    lightOn = on;
+    relayState = on;
     digitalWrite(PIN_RELAY, on ? HIGH : LOW);
     Serial.printf("[RELAY] Light %s\n", on ? "ON" : "OFF");
     Debug.printf("[RELAY] Light %s\n", on ? "ON" : "OFF");
 }
 
 void toggleRelay() {
-    setRelay(!lightOn);
+    setRelay(!relayState);
 }
 
 // ── MQTT ─────────────────────────────────────────
@@ -120,7 +119,7 @@ void mqttPublishState() {
     if (mqttServer.length() == 0) return;
     if (!mqtt.connected()) return;
 
-    String power = lightOn ? "ON" : "OFF";
+    String power = relayState ? "ON" : "OFF";
     String payload = "{\"externalId\":\"" + deviceKey + "\",\"power\":\"" + power + "\"}";
     if (mqttTopic.length() > 0) {
         mqtt.publish(mqttTopic.c_str(), payload.c_str());
@@ -162,18 +161,19 @@ void handleSwitchInterrupt() {
     unsigned long now = millis();
 
     // Debounce: only act when stable for DEBOUNCE_MS
-    if (raw != lastSwitchRaw) {
+    if (raw != lastSwitchState) {
         lastDebounceTime = now;
-        lastSwitchRaw = raw;
     }
 
-    if ((now - lastDebounceTime) > DEBOUNCE_MS && raw != switchOn) {
-        switchOn = raw;
-        if (switchOn == LOW) {
-            // Switch pressed (GND connected) → toggle light
-            toggleRelay();
-            mqttPublishState();
-        }
+    // Two-position interruptor: any stable change of position is one toggle
+    // event, regardless of which position it moves to. lastSwitchState is the
+    // position captured at boot (or after all blocking setup), so powering
+    // up in either position never triggers — only changes made *after*
+    // startup are acted on.
+    if ((now - lastDebounceTime) > DEBOUNCE_MS && raw != lastSwitchState) {
+        lastSwitchState = raw;
+        toggleRelay();
+        mqttPublishState();
     }
 }
 
@@ -259,7 +259,7 @@ void setupWebServer() {
 
     // GET /state → get light state
     server.on("/state", HTTP_GET, []() {
-        String state = lightOn ? "on" : "off";
+        String state = relayState ? "high" : "low";
         sendJSON(200, "{\"state\":\"" + state + "\"}");
     });
 
@@ -272,7 +272,7 @@ void setupWebServer() {
             toggleRelay();
         }
 
-        String state = lightOn ? "on" : "off";
+        String state = relayState ? "high" : "low";
         sendJSON(200, "{\"state\":\"" + state + "\"}");
 
         mqttPublishState();
@@ -344,11 +344,10 @@ void setup() {
     // GPIOs
     pinMode(PIN_RELAY, OUTPUT);
     digitalWrite(PIN_RELAY, LOW);
-    lightOn = false;
+    relayState = false;
 
     pinMode(PIN_SWITCH, INPUT_PULLUP);
-    lastSwitchRaw = digitalRead(PIN_SWITCH);
-    switchOn = lastSwitchRaw;
+    lastSwitchState = digitalRead(PIN_SWITCH);
 
     loadMqttConfig();
     setupWiFi();
@@ -356,6 +355,9 @@ void setup() {
     setupOTA();
     setupRemoteDebug();
     setupWebServer();
+ 
+    lastSwitchState = digitalRead(PIN_SWITCH);;
+    lastDebounceTime = millis();
 }
 
 void loop() {
